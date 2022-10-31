@@ -172,7 +172,8 @@ class DB:
                 {"word": w},
             ).fetchone()
         res = (
-            e if e is None else json.loads(e[0].decode()) if column == "p_e_m" else e[0]
+            # e if e is None else json.loads(e[0].decode()) if column == "p_e_m" else e[0]
+            e if e is None else json.loads(e[0]) if column == "p_e_m" else e[0]
         )
 
         return res

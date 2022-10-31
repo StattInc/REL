@@ -64,40 +64,26 @@ class MentionDetectionBase:
         :return: mention
         """
 
-        # TODO: This can be optimised (less db calls required).
         cur_m = modify_uppercase_phrase(m)
-        freq_lookup_cur_m = self.wiki_db.wiki(cur_m, "wiki", "freq")
-
-        if not freq_lookup_cur_m:
-            cur_m = m
-
         freq_lookup_m = self.wiki_db.wiki(m, "wiki", "freq")
         freq_lookup_cur_m = self.wiki_db.wiki(cur_m, "wiki", "freq")
 
-        if freq_lookup_m and (freq_lookup_m > freq_lookup_cur_m):
-            # Cases like 'U.S.' are handed badly by modify_uppercase_phrase
+        if freq_lookup_m and freq_lookup_cur_m:
+            if freq_lookup_m > freq_lookup_cur_m:
+                cur_m = m
+        elif freq_lookup_m and not freq_lookup_cur_m:
             cur_m = m
-
-        freq_lookup_cur_m = self.wiki_db.wiki(cur_m, "wiki", "freq")
-        # If we cannot find the exact mention in our index, we try our luck to
-        # find it in a case insensitive index.
-        if not freq_lookup_cur_m:
-            # cur_m and m both not found, verify if lower-case version can be found.
+        elif not freq_lookup_m and not freq_lookup_cur_m:
+            # now start looking for others
             find_lower = self.wiki_db.wiki(m.lower(), "wiki", "lower")
 
             if find_lower:
                 cur_m = find_lower
+            else:
+                temp = re.sub(r"[\(.|,|!|')]", "", m).strip()
+                simple_lookup = self.wiki_db.wiki(temp, "wiki", "freq")
 
-        freq_lookup_cur_m = self.wiki_db.wiki(cur_m, "wiki", "freq")
-        # Try and remove first or last characters (e.g. 'Washington,' to 'Washington')
-        # To be error prone, we only try this if no match was found thus far, else
-        # this might get in the way of 'U.S.' converting to 'US'.
-        # Could do this recursively, interesting to explore in future work.
-        if not freq_lookup_cur_m:
-            temp = re.sub(r"[\(.|,|!|')]", "", m).strip()
-            simple_lookup = self.wiki_db.wiki(temp, "wiki", "freq")
-
-            if simple_lookup:
-                cur_m = temp
-
+                if simple_lookup:
+                    cur_m = temp        
+        
         return cur_m
