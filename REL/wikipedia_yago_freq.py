@@ -40,7 +40,7 @@ class WikipediaYagoFreq:
 
         wiki_db.load_wiki(self.p_e_m, self.mention_freq, batch_size=50000, reset=True)
 
-    def compute_wiki(self):
+    def compute_wiki(self, limit=100):
         """
         Computes p(e|m) index for a given wiki and crosswikis dump.
 
@@ -60,7 +60,7 @@ class WikipediaYagoFreq:
                 self.wiki_freq[ent_mention].items(), key=lambda kv: kv[1], reverse=True
             )
             # Get the sum of at most 100 candidates, but less if less are available.
-            total_count = np.sum([v for k, v in ent_wiki_names][:100])
+            total_count = np.sum([v for k, v in ent_wiki_names][:limit])
 
             if total_count < 1:
                 continue
@@ -70,7 +70,7 @@ class WikipediaYagoFreq:
             for ent_name, count in ent_wiki_names:
                 self.p_e_m[ent_mention][ent_name] = count / total_count
 
-                if len(self.p_e_m[ent_mention]) >= 100:
+                if len(self.p_e_m[ent_mention]) >= limit:
                     break
 
         del self.wiki_freq
@@ -242,6 +242,7 @@ class WikipediaYagoFreq:
         wiki_anchor_files = os.listdir(
             os.path.join(self.base_url, self.wiki_version, "basic_data/anchor_files/")
         )
+        wiki_anchor_files = sorted(wiki_anchor_files)
         for wiki_anchor in wiki_anchor_files:
             wiki_file = os.path.join(
                 self.base_url,
@@ -249,7 +250,8 @@ class WikipediaYagoFreq:
                 "basic_data/anchor_files/",
                 wiki_anchor,
             )
-
+            print(f"Now processing {wiki_file}...")
+            print(f"Last processed id: {last_processed_id}")
             with open(wiki_file, "r", encoding="utf-8") as f:
                 for line in f:
                     num_lines += 1
