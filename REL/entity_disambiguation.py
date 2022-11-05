@@ -37,6 +37,8 @@ class EntityDisambiguation:
         self.wiki_version = wiki_version
         self.embeddings = {}
         self.config = self.__get_config(user_config)
+        self.learning_rate = self.config["learning_rate"]
+        self.running_learning_rate = self.learning_rate
 
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.prerank_model = None
@@ -113,6 +115,10 @@ class EntityDisambiguation:
             "use_local": True,
             "use_local_only": False,
             "oracle": False,
+            "lr_drop": 20,
+            "use_lr_scheduler": False,
+            "lr_change_after_n_epochs": 10,
+            "lr_change_factor": 0.1
         }
 
         default_config.update(user_config)
@@ -198,6 +204,9 @@ class EntityDisambiguation:
 
                 self.__batch_embs[name] = []
                 self.__batch_embs[name].append(torch.tensor(e))
+    
+    def lr_scheduler(self, epoch):
+        return self.learning_rate * (0.5 ** (epoch // self.config["lr_drop"]))
 
     def train(self, org_train_dataset, org_dev_datasets):
         """
@@ -214,7 +223,10 @@ class EntityDisambiguation:
         print("Creating optimizer")
         optimizer = optim.Adam(
             [p for p in self.model.parameters() if p.requires_grad],
-            lr=self.config["learning_rate"],
+            lr=self.learning_rate,
+        )
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, "max", patience=self.config["lr_change_after_n_epochs"], verbose=True, factor=self.config["lr_change_factor"]
         )
         best_f1 = -1
         not_better_count = 0
@@ -333,15 +345,17 @@ class EntityDisambiguation:
                         org_dev_datasets[dname], predictions
                     )
                     print(
-                        dname,
+                        # dname,
                         utils.tokgreen(
                             "Micro F1: {}, Recall: {}, Precision: {}".format(
                                 f1, recall, precision
                             )
-                        ),
+                        )
                     )
 
-                    if dname == "aida_testA":
+                    # if dname == "aida_testA":
+                    #     dev_f1 = f1
+                    if dname == "combined_dataset":
                         dev_f1 = f1
 
                 if (
@@ -359,12 +373,21 @@ class EntityDisambiguation:
 
                 if dev_f1 < best_f1:
                     not_better_count += 1
-                    print("Not improving", not_better_count)
+                    print(f"Not improving {not_better_count} - top score: {best_f1}")
                 else:
                     not_better_count = 0
                     best_f1 = dev_f1
                     print("save model to", self.config["model_path"])
                     self.__save(self.config["model_path"])
+
+                if self.config["use_lr_scheduler"]:
+                    # new_learning_rate = self.lr_scheduler(e)
+                    # if new_learning_rate < self.running_learning_rate:
+                    #     self.running_learning_rate = new_learning_rate
+                    #     print(f"change learning rate to {new_learning_rate}")
+                    #     for param_group in optimizer.param_groups:
+                    #         param_group["lr"] = new_learning_rate
+                    scheduler.step(dev_f1)
 
                 if not_better_count == self.config["n_not_inc"]:
                     break
@@ -396,12 +419,12 @@ class EntityDisambiguation:
             print("Total NIL: {}".format(total_nil))
             print("----------------------------------")
 
-    def __create_dataset_LR(self, datasets, predictions, dname):
+    def __create_dataset_LR(self, train_dataset, predictions):
         X = []
         y = []
         meta = []
         for doc, preds in predictions.items():
-            gt_doc = [c["gold"][0] for c in datasets[dname][doc]]
+            gt_doc = [c["gold"][0] for c in train_dataset[doc]]
             for pred, gt in zip(preds, gt_doc):
                 scores = [float(x) for x in pred["scores"]]
                 cands = pred["candidates"]
@@ -420,7 +443,7 @@ class EntityDisambiguation:
 
         return np.array(X), np.array(y), np.array(meta)
 
-    def train_LR(self, datasets, model_path_lr, store_offline=True, threshold=0.3):
+    def train_LR(self, org_train_dataset, org_dev_datasets, model_path_lr, store_offline=True, threshold=0.3):
         """
         Function that applies LR in an attempt to get confidence scores. Recall should be high,
         because if it is low than we would have ignored a corrrect entity.
@@ -430,24 +453,22 @@ class EntityDisambiguation:
         print(os.path.join(model_path_lr, "lr_model.pkl"))
 
         train_dataset = self.get_data_items(
-            datasets["aida_train"], "train", predict=False
+            org_train_dataset, "train", predict=False
         )
 
         dev_datasets = []
-        for dname, data in list(datasets.items()):
-            if dname == "aida_train":
-                continue
+        for dname, data in org_dev_datasets.items():
             dev_datasets.append((dname, self.get_data_items(data, dname, predict=True)))
 
         model = LogisticRegression()
 
         predictions = self.__predict(train_dataset, eval_raw=True)
-        X, y, meta = self.__create_dataset_LR(datasets, predictions, "aida_train")
+        X, y, meta = self.__create_dataset_LR(org_train_dataset, predictions)
         model.fit(X, y)
 
         for dname, data in dev_datasets:
             predictions = self.__predict(data, eval_raw=True)
-            X, y, meta = self.__create_dataset_LR(datasets, predictions, dname)
+            X, y, meta = self.__create_dataset_LR(org_dev_datasets[dname], predictions)
             preds = model.predict_proba(X)
             preds = np.array([x[1] for x in preds])
 
@@ -915,12 +936,18 @@ class EntityDisambiguation:
                 self.__embed_words(named_cands_filt, "entity", "embeddings")
 
                 # Use re.split() to make sure that special characters are considered.
+                # lctx = [
+                #     x for x in re.split("(\W)", m["context"][0].strip()) if x != " "
+                # ]  # .split()
                 lctx = [
-                    x for x in re.split("(\W)", m["context"][0].strip()) if x != " "
-                ]  # .split()
+                    x for x in utils.nltk_tokenize_text(m["context"][0].strip()) if x != " "
+                ]
+                # rctx = [
+                #     x for x in re.split("(\W)", m["context"][1].strip()) if x != " "
+                # ]  # split()
                 rctx = [
-                    x for x in re.split("(\W)", m["context"][1].strip()) if x != " "
-                ]  # split()
+                    x for x in utils.nltk_tokenize_text(m["context"][1].strip()) if x != " "
+                ]
 
                 words_filt = set(
                     [
@@ -932,17 +959,20 @@ class EntityDisambiguation:
 
                 self.__embed_words(words_filt, "word", "embeddings")
 
-                snd_lctx = m["sentence"][: m["pos"]].strip().split()
+                # snd_lctx = m["sentence"][: m["pos"]].strip().split()
+                snd_lctx = utils.nltk_tokenize_text(m["sentence"][: m["pos"]].strip())
                 snd_lctx = [
                     t for t in snd_lctx[-self.config["snd_local_ctx_window"] // 2 :]
                 ]
 
-                snd_rctx = m["sentence"][m["end_pos"] :].strip().split()
+                # snd_rctx = m["sentence"][m["end_pos"] :].strip().split()
+                snd_rctx = utils.nltk_tokenize_text(m["sentence"][m["end_pos"] :].strip())
                 snd_rctx = [
                     t for t in snd_rctx[: self.config["snd_local_ctx_window"] // 2]
                 ]
 
-                snd_ment = m["ngram"].strip().split()
+                # snd_ment = m["ngram"].strip().split()
+                snd_ment = utils.nltk_tokenize_text(m["ngram"].strip())
 
                 words_filt = set(
                     [
@@ -1013,7 +1043,8 @@ class EntityDisambiguation:
                     : min(len(rctx_ids), self.config["ctx_window"] // 2)
                 ]
 
-                ment = m["mention"].strip().split()
+                # ment = m["mention"].strip().split()
+                ment = utils.nltk_tokenize_text(m["mention"].strip())
                 ment_ids = [
                     self.embeddings["word_voca"].get_id(t)
                     for t in ment
